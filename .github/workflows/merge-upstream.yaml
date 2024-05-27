@@ -1,0 +1,25 @@
+name: Merge Upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Merge Upstream
+        run: |
+          git config --global user.name wattmto
+          git config --global user.email '93639059+wattmto@users.noreply.github.com'
+          git pull --unshallow
+          git remote add upstream https://github.com/NixOS/nixpkgs.git
+          git fetch upstream
+          git checkout master
+          git merge --no-edit upstream/master
+          git push origin master
