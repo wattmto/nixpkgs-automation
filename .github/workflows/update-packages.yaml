@@ -1,0 +1,60 @@
+name: Update Packages
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.matrix.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        run: |
+          {
+            echo 'packages<<EOF'
+            jq -rc .packages packages-update.json
+            echo 'EOF'
+          } >> "${GITHUB_OUTPUT}"
+
+  update-with-updatescript:
+    needs: setup-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.packages).withUpdateScript }}
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: nixpkgs
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: wattmto/nixpkgs
+          ref: 'master'
+      - uses: DeterminateSystems/nix-installer-action@v11
+        with:
+          extra-conf: |
+            trusted-substituters = https://cache.nixos.org/ https://nix-community.cachix.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+            sandbox = true
+      - uses: DeterminateSystems/magic-nix-cache-action@v6
+      - name: Create branch
+        run: git checkout -b update-${{ matrix.package }}
+      - name: Configure git
+        run: |
+          git config user.email "93639059+wattmto@users.noreply.github.com"
+          git config user.name "wattmto"
+      - run: |
+          export EDITOR=cat
+          echo "" | nix run github:Mic92/nix-update -- --commit --use-update-script ${{ matrix.package }}
+      - name: Push changes
+        run: |
+          git push -f origin update-${{ matrix.package }}
