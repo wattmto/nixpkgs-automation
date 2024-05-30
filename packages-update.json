@@ -1,0 +1,14 @@
+{
+    "packages": {
+        "withUpdateScript": {
+            "package": [
+                "vscode"
+            ]
+        },
+        "withUpdateScriptExcluded": {
+            "package": [
+                "slack#Until all systems points same version"
+            ]
+        }
+    }
+}
