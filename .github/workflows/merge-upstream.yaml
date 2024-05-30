@@ -28,7 +28,7 @@ jobs:
           repository: wattmto/nixpkgs
           ref: 'master'
       - name: Add Upstream
-        if: steps.cache-repo.outputs.cache-hit == 'false'
+        if: steps.cache-repo.outputs.cache-hit != 'true'
         run: |
           git remote add upstream https://github.com/NixOS/nixpkgs.git
       - name: Merge Upstream
