@@ -16,18 +16,24 @@ jobs:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           repositories: nixpkgs
-
+      - uses: actions/cache@v4
+        id: cache-repo
+        with:
+          path: "**/*"
+          key: "key"
       - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
           repository: wattmto/nixpkgs
           ref: 'master'
-
+      - name: Add Upstream
+        if: steps.cache-repo.outputs.cache-hit == 'false'
+        run: |
+          git remote add upstream https://github.com/NixOS/nixpkgs.git
       - name: Merge Upstream
         run: |
-          git pull --unshallow
-          git remote add upstream https://github.com/NixOS/nixpkgs.git
+          git pull
           git fetch upstream master
           git checkout master
           git merge --no-edit upstream/master
