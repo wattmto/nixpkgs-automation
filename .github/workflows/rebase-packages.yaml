@@ -38,8 +38,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           repository: wattmto/nixpkgs
           ref: 'master'
-      - name: Fetch branch
-        run: git fetch origin ${{ matrix.package }}
+          fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v11
         with:
           extra-conf: |
@@ -53,8 +52,10 @@ jobs:
         run: |
           git config user.email "93639059+wattmto@users.noreply.github.com"
           git config user.name "wattmto"
+      - name: Checkout
+        run: git checkout ${{ matrix.package }}
       - name: Rebase
-        run: git rebase -s theirs origin/${{ matrix.package }}
+        run: git rebase -X theirs origin/master
       - name: Generate node-packages.nix
         run: ./pkgs/development/node-packages/generate.sh
       - name: Commit changes
@@ -63,4 +64,4 @@ jobs:
           git commit --amend --no-edit
       - name: Push changes
         run: |
-          git push -f origin rebase-${{ matrix.package }}
+          git push -f origin ${{ matrix.package }}:rebase-${{ matrix.package }}
