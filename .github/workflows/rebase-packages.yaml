@@ -1,4 +1,4 @@
-name: Update Packages
+name: Rebase Packages
 
 on:
   schedule:
@@ -16,15 +16,15 @@ jobs:
         run: |
           {
             echo 'packages<<EOF'
-            jq -rc .packages packages-update.json
+            jq -rc .packages packages-rebase.json
             echo 'EOF'
           } >> "${GITHUB_OUTPUT}"
 
-  update-with-updatescript:
+  rebase-with-node-packages-generate:
     needs: setup-matrix
     runs-on: ubuntu-latest
     strategy:
-      matrix: ${{ fromJson(needs.setup-matrix.outputs.packages).withUpdateScript }}
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.packages).withNodePackagesGenerate }}
     steps:
       - uses: actions/create-github-app-token@v1
         id: app-token
@@ -38,6 +38,8 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           repository: wattmto/nixpkgs
           ref: 'master'
+      - name: Fetch branch
+        run: git fetch origin ${{ matrix.package }}
       - uses: DeterminateSystems/nix-installer-action@v11
         with:
           extra-conf: |
@@ -46,14 +48,19 @@ jobs:
             sandbox = true
       - uses: DeterminateSystems/magic-nix-cache-action@v6
       - name: Create branch
-        run: git checkout -b update-${{ matrix.package }}
+        run: git checkout -b ${{ matrix.package }}
       - name: Configure git
         run: |
           git config user.email "93639059+wattmto@users.noreply.github.com"
           git config user.name "wattmto"
-      - run: |
-          export EDITOR=cat
-          echo "" | nix run github:Mic92/nix-update -- --commit --use-update-script ${{ matrix.package }}
+      - name: Rebase
+        run: git rebase -s theirs origin/${{ matrix.package }}
+      - name: Generate node-packages.nix
+        run: ./pkgs/development/node-packages/generate.sh
+      - name: Commit changes
+        run: |
+          git add pkgs/development/node-packages/node-packages.nix
+          git commit --amend --no-edit
       - name: Push changes
         run: |
-          git push -f origin update-${{ matrix.package }}
+          git push -f origin rebase-${{ matrix.package }}
