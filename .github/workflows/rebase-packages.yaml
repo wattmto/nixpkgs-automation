@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: '0 1 * * *'
   workflow_dispatch:
+  push:
+    paths:
+      - '**'
 
 jobs:
   setup-matrix:
