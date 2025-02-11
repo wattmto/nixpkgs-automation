@@ -3,6 +3,7 @@ name: Rebase Packages
 on:
   pull_request:
     paths:
+      - "packages-rebase.json"
       - ".github/workflows/rebase-packages.yaml"
   schedule:
     - cron: '0 1 * * *'

@@ -3,6 +3,7 @@ name: Update Packages
 on:
   pull_request:
     paths:
+      - "packages-update.json"
       - ".github/workflows/update-packages.yaml"
   schedule:
     - cron: '0 1 * * *'
