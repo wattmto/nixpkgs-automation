@@ -2,7 +2,6 @@
     "packages": {
         "withNodePackagesGenerate": {
             "package": [
-                "nodePackages.create-cljs-project"
             ]
         }
     }
