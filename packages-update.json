@@ -2,6 +2,7 @@
     "packages": {
         "withUpdateScript": {
             "package": [
+                "macskk",
                 "vscode"
             ]
         },
