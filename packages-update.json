@@ -2,7 +2,7 @@
     "packages": {
         "withUpdateScript": {
             "package": [
-                "slack",
+                "slack"
             ]
         },
         "withUpdateScriptExcluded": {
