@@ -1,6 +1,9 @@
 name: Update Packages
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/update-packages.yaml"
   schedule:
     - cron: '0 1 * * *'
   workflow_dispatch:
