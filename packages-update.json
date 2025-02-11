@@ -3,6 +3,7 @@
         "withUpdateScript": {
             "package": [
                 "macskk",
+                "slack",
                 "vscode"
             ]
         },
