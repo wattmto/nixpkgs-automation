@@ -3,12 +3,8 @@
         "withUpdateScript": {
             "package": [
                 "macskk",
+                "slack",
                 "vscode"
-            ]
-        },
-        "withUpdateScriptExcluded": {
-            "package": [
-                "slack#Until all systems points same version"
             ]
         }
     }
