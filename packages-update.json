@@ -2,9 +2,7 @@
     "packages": {
         "withUpdateScript": {
             "package": [
-                "macskk",
                 "slack",
-                "vscode"
             ]
         },
         "withUpdateScriptExcluded": {
