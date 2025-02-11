@@ -57,7 +57,11 @@ jobs:
           git config user.name "wattmto"
       - run: |
           export EDITOR=cat
-          echo "" | nix run github:Mic92/nix-update -- --commit --use-update-script ${{ matrix.package }}
+          if ! echo "" | nix run github:Mic92/nix-update -- --commit --use-update-script ${{ matrix.package }} ;
+          then
+	    # some package updates Mac versions more frequent.
+            echo "" | nix run github:Mic92/nix-update -- --system aarch64-darwin --commit --use-update-script ${{ matrix.package }}
+	  fi
       - name: Push changes
         run: |
           git push -f origin update-${{ matrix.package }}
