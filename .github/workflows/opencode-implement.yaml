@@ -1,0 +1,151 @@
+name: OpenCode Implement
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+  id-token: write
+
+jobs:
+  implement:
+    if: |
+      (
+        github.event_name == 'issues' &&
+        github.event.issue.pull_request == null &&
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'opencode:implement' &&
+        github.event.sender.type != 'Bot'
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request == null &&
+        contains(github.event.comment.body, '/oc implement') &&
+        (
+          github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR'
+        ) &&
+        github.event.sender.type != 'Bot'
+      )
+    concurrency:
+      group: opencode-implement-${{ github.repository }}-${{ github.event.issue.number || github.run_id }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check for existing OpenCode PR
+        id: preflight
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          prefix="opencode/issue-${ISSUE_NUMBER}-"
+          mapfile -t existing_prs < <(gh pr list --state open --json number,headRefName,url --jq ".[] | select(.headRefName | startswith(\"${prefix}\")) | [.number, .url] | @tsv")
+          count=${#existing_prs[@]}
+
+          if [ "$count" -gt 1 ]; then
+            echo "More than one open OpenCode PR already exists for issue ${ISSUE_NUMBER}." >&2
+            printf '%s\n' "${existing_prs[@]}" >&2
+            exit 1
+          fi
+
+          if [ "$count" -eq 1 ]; then
+            pr_number="${existing_prs[0]%%$'\t'*}"
+            pr_url="${existing_prs[0]#*$'\t'}"
+            echo "existing_pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+            echo "existing_pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run OpenCode implementer
+        id: run_opencode
+        uses: anomalyco/opencode/github@latest
+        env:
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          # GH_TOKEN is only needed when the default github.token is not sufficient
+          # for downstream GitHub operations such as cross-workflow dispatches.
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        with:
+          model: cerebras/zai-glm-4.7
+          agent: opencode-implement
+          prompt: Implement the current GitHub issue in this repository and create or update the single draft PR for it.
+          use_github_token: true
+
+      - name: Resolve implementation PR
+        if: success()
+        id: resolve_pr
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          prefix="opencode/issue-${ISSUE_NUMBER}-"
+          # The PR can take a few seconds to become visible after OpenCode creates it,
+          # so this loop intentionally waits for GitHub API propagation.
+          for attempt in 1 2 3 4 5; do
+            mapfile -t matching_prs < <(gh pr list --state open --json number,headRefName,url --jq ".[] | select(.headRefName | startswith(\"${prefix}\")) | [.number, .url] | @tsv")
+            count=${#matching_prs[@]}
+
+            if [ "$count" -eq 1 ]; then
+              pr_number="${matching_prs[0]%%$'\t'*}"
+              pr_url="${matching_prs[0]#*$'\t'}"
+              echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+              echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if [ "$count" -gt 1 ]; then
+              echo "Multiple OpenCode PRs matched issue ${ISSUE_NUMBER}." >&2
+              printf '%s\n' "${matching_prs[@]}" >&2
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          echo "No OpenCode PR was found for issue ${ISSUE_NUMBER} after implementation completed." >&2
+          exit 1
+
+      - name: Dispatch OpenCode review
+        if: success() && steps.resolve_pr.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh workflow run opencode-review.yaml -f pr_number="$PR_NUMBER"
+
+      - name: Summarize diagnostics
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## OpenCode implementer'
+            echo
+            echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment failure back to the issue
+        if: failure() || cancelled()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
+          body=$'OpenCode implementation did not complete successfully.\n\n'
+          body+=$"Run: ${RUN_URL}"
+          gh api "repos/${{ github.repository }}/issues/${number}/comments" -f body="$body" >/dev/null
