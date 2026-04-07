@@ -1,0 +1,44 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "openai": {
+      "options": {
+        "baseURL": "{env:OPENAI_BASE_URL}"
+      },
+      "models": {
+        "gpt-oss-120b": {
+          "name": "gpt-oss-120b"
+        },
+        "GLM-4.7-AWQ": {
+          "name": "GLM-4.7-AWQ"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "grep_app": {
+      "type": "remote",
+      "url": "https://mcp.grep.app",
+      "enabled": true,
+      "timeout": 8000
+    },
+    "deepwiki": {
+      "type": "remote",
+      "url": "https://mcp.deepwiki.com/mcp",
+      "enabled": true,
+      "timeout": 8000
+    },
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp",
+      "enabled": true,
+      "timeout": 8000
+    },
+    "websearch": {
+      "type": "remote",
+      "url": "https://mcp.exa.ai/mcp?tools=web_search_exa",
+      "enabled": true,
+      "timeout": 8000
+    }
+  }
+}
