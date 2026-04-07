@@ -1,0 +1,484 @@
+name: OpenCode Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review.
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  review:
+    # workflow_dispatch is an explicit manual path, so it takes a PR number input
+    # instead of parsing /oc review commands from comment events.
+    if: |
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        startsWith(github.event.pull_request.head.ref, 'opencode/issue-')
+      ) ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.pr_number != ''
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '/oc review') &&
+        (
+          github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR'
+        ) &&
+        github.event.sender.type != 'Bot'
+      ) ||
+      (
+        github.event_name == 'pull_request_review_comment' &&
+        (
+          contains(github.event.comment.body, '/oc review') ||
+          github.event.comment.in_reply_to_id != null
+        ) &&
+        github.event.sender.type != 'Bot'
+      )
+    concurrency:
+      group: opencode-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve pull request number
+        id: resolve_pr
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_number=''
+          case "${{ github.event_name }}" in
+            pull_request)
+              pr_number='${{ github.event.pull_request.number }}'
+              ;;
+            issue_comment)
+              pr_number='${{ github.event.issue.number }}'
+              ;;
+            pull_request_review_comment)
+              pr_number='${{ github.event.pull_request.number }}'
+              ;;
+            workflow_dispatch)
+              pr_number='${{ github.event.inputs.pr_number }}'
+              ;;
+          esac
+
+          if [ -z "$pr_number" ]; then
+            echo 'Unable to resolve pull request number for review.' >&2
+            exit 1
+          fi
+
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pull request merge ref
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/pull/${{ steps.resolve_pr.outputs.pr_number }}/merge
+
+      - name: Preflight context guard
+        id: preflight
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+
+          pr_number='${{ steps.resolve_pr.outputs.pr_number }}'
+
+          mapfile -t changed_files < <(gh api --paginate "repos/${{ github.repository }}/pulls/${pr_number}/files?per_page=100" --jq '.[].filename')
+          file_count=${#changed_files[@]}
+          tmp_count=0
+
+          if [ "$file_count" -gt 0 ]; then
+            tmp_count=$(printf '%s\n' "${changed_files[@]}" | grep -c '^\.opencode-tmp/' || true)
+          fi
+
+          if [ "$tmp_count" -gt 0 ]; then
+            echo 'skip_opencode=true' >> "$GITHUB_OUTPUT"
+            echo 'skip_reason=detected .opencode-tmp/** files in PR diff' >> "$GITHUB_OUTPUT"
+          elif [ "$file_count" -gt 250 ]; then
+            echo 'skip_opencode=true' >> "$GITHUB_OUTPUT"
+            echo "skip_reason=PR diff too large for reliable agent context (${file_count} files)" >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip_opencode=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record current bot comment baseline
+        if: steps.preflight.outputs.skip_opencode != 'true'
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          comment_id="$(gh api "repos/${{ github.repository }}/issues/${{ steps.resolve_pr.outputs.pr_number }}/comments?per_page=100" --jq '[.[] | select(.user.login == "github-actions[bot]") | .id] | max // 0')"
+          echo "comment_id=${comment_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect review-thread reply context
+        if: steps.preflight.outputs.skip_opencode != 'true'
+        id: thread_context
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request_review_comment" ]; then
+            echo 'mode=full_review' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          current_comment_json="$(gh api "repos/${{ github.repository }}/pulls/comments/${{ github.event.comment.id }}")"
+          parent_comment_id="$(printf '%s' "$current_comment_json" | jq -r '.in_reply_to_id // empty')"
+
+          if [ -z "$parent_comment_id" ]; then
+            if printf '%s' '${{ github.event.comment.body }}' | grep -q '/oc review'; then
+              echo 'mode=full_review' >> "$GITHUB_OUTPUT"
+            else
+              echo 'mode=skip' >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          parent_json="$(gh api "repos/${{ github.repository }}/pulls/comments/${parent_comment_id}" 2>/dev/null || true)"
+          if [ -z "$parent_json" ]; then
+            echo 'mode=skip' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          parent_body="$(printf '%s' "$parent_json" | jq -r '.body')"
+
+          if printf '%s' "$parent_body" | grep -q '^<!-- OPCODE_INLINE_REVIEW -->'; then
+            echo 'mode=thread_reply' >> "$GITHUB_OUTPUT"
+            echo "parent_comment_id=${parent_comment_id}" >> "$GITHUB_OUTPUT"
+          elif printf '%s' '${{ github.event.comment.body }}' | grep -q '/oc review'; then
+            echo 'mode=full_review' >> "$GITHUB_OUTPUT"
+          else
+            echo 'mode=skip' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build review prompt
+        if: steps.preflight.outputs.skip_opencode != 'true' && steps.thread_context.outputs.mode != 'skip'
+        id: prompt
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+          PARENT_COMMENT_ID: ${{ steps.thread_context.outputs.parent_comment_id }}
+          CURRENT_COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.thread_context.outputs.mode }}" = 'thread_reply' ]; then
+            parent_json="$(gh api "repos/${{ github.repository }}/pulls/comments/${PARENT_COMMENT_ID}")"
+            parent_body="$(printf '%s' "$parent_json" | jq -r '.body')"
+            {
+              echo 'text<<EOF'
+              echo 'Reply to the current pull request review thread.'
+              echo 'Return only the hidden OPCODE_THREAD_REPLY block described in the review agent instructions.'
+              echo 'Always include a short non-empty reply_body for the in-thread response.'
+              echo 'Do not claim the thread is already resolved inside reply_body; resolution is handled separately by the workflow when permissions allow it.'
+              echo 'Set resolve to true only if the user reply indicates the issue is fixed, accepted, or no longer actionable.'
+              echo
+              echo 'Parent inline review comment:'
+              printf '%s\n' "$parent_body"
+              echo
+              echo 'User reply:'
+              printf '%s\n' "$CURRENT_COMMENT_BODY"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo 'text<<EOF'
+              echo 'Review the current pull request for this repository. Put file-specific findings on changed lines into the hidden OPCODE_INLINE_REVIEW JSON block at the end of your comment, and use the visible PR comment body only for overall summary or findings that cannot be attached cleanly to a diff location.'
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment preflight skip back to the PR
+        if: steps.preflight.outputs.skip_opencode == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+
+          number='${{ steps.resolve_pr.outputs.pr_number }}'
+
+          body=$'OpenCode review skipped to avoid low-signal output.\n\n'
+          body+=$"Reason: ${{ steps.preflight.outputs.skip_reason }}"
+          gh api "repos/${{ github.repository }}/issues/${number}/comments" -f body="$body" >/dev/null
+
+      - name: Run OpenCode reviewer
+        if: steps.preflight.outputs.skip_opencode != 'true' && steps.thread_context.outputs.mode != 'skip'
+        id: run_opencode
+        uses: anomalyco/opencode/github@latest
+        env:
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          # Webhook-triggered runs can use github.token.
+          # Set GH_TOKEN to a PAT only for manual gh workflow dispatches or API calls that need broader scopes.
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        with:
+          model: cerebras/zai-glm-4.7
+          agent: opencode-review
+          prompt: ${{ steps.prompt.outputs.text }}
+          use_github_token: true
+
+      - name: Extract structured inline review findings
+        if: success() && steps.preflight.outputs.skip_opencode != 'true' && steps.thread_context.outputs.mode != 'thread_reply'
+        id: extract_inline
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+          BASELINE_COMMENT_ID: ${{ steps.baseline.outputs.comment_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          pr_number = os.environ['PR_NUMBER']
+          baseline = int(os.environ['BASELINE_COMMENT_ID'])
+          repo = '${{ github.repository }}'
+          output_path = Path(os.environ['RUNNER_TEMP']) / 'opencode-inline-review.json'
+
+          cmd = ['gh', 'api', f'repos/{repo}/issues/{pr_number}/comments?per_page=100']
+          comments = json.loads(subprocess.run(cmd, check=True, capture_output=True, text=True).stdout)
+          candidates = [c for c in comments if c['id'] > baseline and c['user']['login'] == 'github-actions[bot]']
+          candidates.sort(key=lambda c: c['id'], reverse=True)
+
+          payload = {'comments': []}
+          for comment in candidates:
+            body = comment.get('body', '')
+            start = body.find('<!-- OPCODE_INLINE_REVIEW')
+            end = body.find('-->', start)
+            if start == -1 or end == -1:
+              continue
+            raw = body[start: end]
+            raw = raw.split('\n', 1)[1].strip()
+            try:
+              payload = json.loads(raw)
+            except json.JSONDecodeError:
+              sanitized = re.sub(r'"line":\s*([0-9]+)"', r'"line": \1', raw)
+              payload = json.loads(sanitized)
+            break
+
+          output_path.write_text(json.dumps(payload), encoding='utf-8')
+          print(f'count={len(payload.get("comments", []))}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+            fh.write(f'count={len(payload.get("comments", []))}\n')
+            fh.write(f'path={output_path}\n')
+          PY
+
+      - name: Extract thread reply action
+        if: success() && steps.thread_context.outputs.mode == 'thread_reply'
+        id: extract_thread_reply
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+          BASELINE_COMMENT_ID: ${{ steps.baseline.outputs.comment_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          pr_number = os.environ['PR_NUMBER']
+          baseline = int(os.environ['BASELINE_COMMENT_ID'])
+          repo = '${{ github.repository }}'
+          output_path = Path(os.environ['RUNNER_TEMP']) / 'opencode-thread-reply.json'
+
+          comments = json.loads(subprocess.run(['gh', 'api', f'repos/{repo}/issues/{pr_number}/comments?per_page=100'], check=True, capture_output=True, text=True).stdout)
+          candidates = [c for c in comments if c['id'] > baseline and c['user']['login'] == 'github-actions[bot]']
+          candidates.sort(key=lambda c: c['id'], reverse=True)
+
+          payload = {'reply_body': '', 'resolve': False, 'comment_ids': []}
+          for comment in candidates:
+            body = comment.get('body', '')
+            start = body.find('<!-- OPCODE_THREAD_REPLY')
+            if start == -1:
+              continue
+
+            search_start = body.find('{', start)
+            if search_start == -1:
+              continue
+
+            decoder = json.JSONDecoder()
+            payload, _ = decoder.raw_decode(body[search_start:])
+            payload['comment_ids'] = [c['id'] for c in candidates if '<!-- OPCODE_THREAD_REPLY' in c.get('body', '')]
+            break
+
+          output_path.write_text(json.dumps(payload), encoding='utf-8')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+            fh.write(f'path={output_path}\n')
+          PY
+
+      - name: Delete helper thread-reply comments
+        if: success() && steps.thread_context.outputs.mode == 'thread_reply'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          THREAD_REPLY_JSON_PATH: ${{ steps.extract_thread_reply.outputs.path }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          payload = json.loads(open(os.environ['THREAD_REPLY_JSON_PATH'], 'r', encoding='utf-8').read())
+          repo = '${{ github.repository }}'
+          for comment_id in payload.get('comment_ids', []):
+            subprocess.run(['gh', 'api', f'repos/{repo}/issues/comments/{comment_id}', '-X', 'DELETE'], check=True, capture_output=True, text=True)
+          PY
+
+      - name: Remove previous managed inline review comments
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/comments?per_page=100" --jq '.[] | select(.user.login == "github-actions[bot]") | [.id, .body] | @tsv' | while IFS=$'\t' read -r comment_id body; do
+            if printf '%s' "$body" | grep -q '^<!-- OPCODE_INLINE_REVIEW -->'; then
+              gh api "repos/${{ github.repository }}/pulls/comments/${comment_id}" -X DELETE >/dev/null
+            fi
+          done
+
+      - name: Create inline review comments
+        if: success() && steps.extract_inline.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+          INLINE_JSON_PATH: ${{ steps.extract_inline.outputs.path }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          repo = '${{ github.repository }}'
+          pr_number = os.environ['PR_NUMBER']
+          head_sha = json.loads(subprocess.run(['gh', 'pr', 'view', pr_number, '--json', 'headRefOid'], check=True, capture_output=True, text=True).stdout)['headRefOid']
+          payload = json.loads(open(os.environ['INLINE_JSON_PATH'], 'r', encoding='utf-8').read())
+
+          for item in payload.get('comments', []):
+            if not isinstance(item.get('path'), str) or item['path'].strip() == '' or item['path'].startswith('../') or '/..' in item['path']:
+              continue
+            try:
+              line = int(item['line'])
+            except (KeyError, TypeError, ValueError):
+              continue
+            body = '<!-- OPCODE_INLINE_REVIEW -->\n' + item['body']
+            subprocess.run([
+              'gh', 'api', f'repos/{repo}/pulls/{pr_number}/comments', '-X', 'POST',
+              '-f', f'body={body}',
+              '-f', f'commit_id={head_sha}',
+              '-f', f'path={item["path"]}',
+              '-F', f'line={line}',
+              '-f', 'side=RIGHT',
+            ], check=True, capture_output=True, text=True)
+          PY
+
+      - name: Reply in review thread
+        if: success() && steps.thread_context.outputs.mode == 'thread_reply'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+          PARENT_COMMENT_ID: ${{ steps.thread_context.outputs.parent_comment_id }}
+          THREAD_REPLY_JSON_PATH: ${{ steps.extract_thread_reply.outputs.path }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          payload = json.loads(open(os.environ['THREAD_REPLY_JSON_PATH'], 'r', encoding='utf-8').read())
+          body = payload.get('reply_body', '').strip()
+          if not body:
+            raise SystemExit(0)
+
+          subprocess.run([
+            'gh', 'api', f'repos/${{ github.repository }}/pulls/{os.environ["PR_NUMBER"]}/comments/{os.environ["PARENT_COMMENT_ID"]}/replies',
+            '-X', 'POST', '-f', f'body={body}'
+          ], check=True, capture_output=True, text=True)
+          PY
+
+      - name: Resolve review thread when requested
+        if: success() && steps.thread_context.outputs.mode == 'thread_reply'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+          PARENT_COMMENT_ID: ${{ steps.thread_context.outputs.parent_comment_id }}
+          THREAD_REPLY_JSON_PATH: ${{ steps.extract_thread_reply.outputs.path }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo 'GH_TOKEN secret is not configured; skipping thread resolution.'
+            exit 0
+          fi
+
+          resolve_requested="$(python3 - <<'PY'
+          import json, os
+          payload = json.loads(open(os.environ['THREAD_REPLY_JSON_PATH'], 'r', encoding='utf-8').read())
+          print('true' if payload.get('resolve') else 'false')
+          PY
+          )"
+
+          if [ "$resolve_requested" != 'true' ]; then
+            exit 0
+          fi
+
+          thread_json="$(gh api graphql -f query='query($owner:String!, $repo:String!, $pr:Int!) { repository(owner:$owner, name:$repo) { pullRequest(number:$pr) { reviewThreads(first:100) { nodes { id isResolved comments(first:20) { nodes { databaseId } } } } } } }' -F owner='${{ github.repository_owner }}' -F repo='${{ github.event.repository.name }}' -F pr='${{ steps.resolve_pr.outputs.pr_number }}')"
+
+          thread_id="$(printf '%s' "$thread_json" | jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select((.comments.nodes | map(.databaseId) | index('"${PARENT_COMMENT_ID}"')) != null and (.isResolved | not)) | .id' | head -n 1)"
+
+          if [ -z "$thread_id" ] || [ "$thread_id" = 'null' ]; then
+            exit 0
+          fi
+
+          if ! gh api graphql -f query='mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}) { thread { isResolved } } }' -F threadId="$thread_id" >/dev/null; then
+            echo 'Unable to resolve the review thread with the current GH_TOKEN permissions; leaving the thread open.'
+          fi
+
+      - name: Summarize diagnostics
+        if: always() && steps.preflight.outputs.skip_opencode != 'true'
+        shell: bash
+        run: |
+          {
+            echo '## OpenCode reviewer'
+            echo
+            echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment failure back to the PR
+        if: (failure() || cancelled()) && steps.preflight.outputs.skip_opencode != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          number='${{ steps.resolve_pr.outputs.pr_number }}'
+
+          body=$'OpenCode review did not complete successfully.\n\n'
+          body+=$"Run: ${RUN_URL}"
+          gh api "repos/${{ github.repository }}/issues/${number}/comments" -f body="$body" >/dev/null
