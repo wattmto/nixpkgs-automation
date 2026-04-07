@@ -1,0 +1,7 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@ast-grep/cli": "0.42.1",
+    "@opencode-ai/plugin": "latest"
+  }
+}

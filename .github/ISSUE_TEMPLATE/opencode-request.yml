@@ -1,0 +1,52 @@
+name: OpenCode request
+description: Ask OpenCode to derive requirements, break work down, and prepare an implementation lane.
+title: "[opencode] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!-- opencode:plan -->
+        Use this template when you want OpenCode to turn an issue into a concrete plan.
+
+        What happens next:
+        1. Planning runs automatically and comments with requirements, assumptions, and a task breakdown.
+        2. A maintainer can start implementation later by adding the `opencode:implement` label or commenting `/oc implement`.
+        3. Draft PRs created from this flow are reviewed automatically when they open or update.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What outcome do you want?
+      placeholder: Add a GitHub Actions workflow that...
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Current context
+      description: What is the current behavior or limitation?
+      placeholder: Today the repository can..., but it cannot...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List the checks that make this issue done.
+      placeholder: |
+        - A new workflow exists for...
+        - The README explains...
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Technical, operational, or process constraints OpenCode must respect.
+      placeholder: Do not touch existing update workflows unless necessary.
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What should explicitly not be included?
+      placeholder: Do not add scheduled automation or auto-merge.
