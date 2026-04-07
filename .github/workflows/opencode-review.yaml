@@ -1,0 +1,178 @@
+name: OpenCode Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review.
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+  id-token: write
+
+jobs:
+  review:
+    if: |
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        startsWith(github.event.pull_request.head.ref, 'opencode/issue-')
+      ) ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.pr_number != ''
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '/oc review') &&
+        (
+          github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR'
+        ) &&
+        github.event.sender.type != 'Bot'
+      ) ||
+      (
+        github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '/oc review') &&
+        (
+          github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR'
+        ) &&
+        github.event.sender.type != 'Bot'
+      )
+    concurrency:
+      group: opencode-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve pull request number
+        id: resolve_pr
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_number=''
+          case "${{ github.event_name }}" in
+            pull_request)
+              pr_number='${{ github.event.pull_request.number }}'
+              ;;
+            issue_comment)
+              pr_number='${{ github.event.issue.number }}'
+              ;;
+            pull_request_review_comment)
+              pr_number='${{ github.event.pull_request.number }}'
+              ;;
+            workflow_dispatch)
+              pr_number='${{ github.event.inputs.pr_number }}'
+              ;;
+          esac
+
+          if [ -z "$pr_number" ]; then
+            echo 'Unable to resolve pull request number for review.' >&2
+            exit 1
+          fi
+
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pull request merge ref
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: refs/pull/${{ steps.resolve_pr.outputs.pr_number }}/merge
+
+      - name: Configure git identity for OpenCode
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Preflight context guard
+        id: preflight
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+
+          pr_number='${{ steps.resolve_pr.outputs.pr_number }}'
+
+          mapfile -t changed_files < <(gh api --paginate "repos/${{ github.repository }}/pulls/${pr_number}/files?per_page=100" --jq '.[].filename')
+          file_count=${#changed_files[@]}
+          tmp_count=0
+
+          if [ "$file_count" -gt 0 ]; then
+            tmp_count=$(printf '%s\n' "${changed_files[@]}" | grep -c '^\.opencode-tmp/' || true)
+          fi
+
+          if [ "$tmp_count" -gt 0 ]; then
+            echo 'skip_opencode=true' >> "$GITHUB_OUTPUT"
+            echo 'skip_reason=detected .opencode-tmp/** files in PR diff' >> "$GITHUB_OUTPUT"
+          elif [ "$file_count" -gt 250 ]; then
+            echo 'skip_opencode=true' >> "$GITHUB_OUTPUT"
+            echo "skip_reason=PR diff too large for reliable agent context (${file_count} files)" >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip_opencode=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment preflight skip back to the PR
+        if: steps.preflight.outputs.skip_opencode == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+
+          number='${{ steps.resolve_pr.outputs.pr_number }}'
+
+          body=$'OpenCode review skipped to avoid low-signal output.\n\n'
+          body+=$"Reason: ${{ steps.preflight.outputs.skip_reason }}"
+          gh api "repos/${{ github.repository }}/issues/${number}/comments" -f body="$body" >/dev/null
+
+      - name: Run OpenCode reviewer
+        if: steps.preflight.outputs.skip_opencode != 'true'
+        id: run_opencode
+        uses: anomalyco/opencode/github@latest
+        env:
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        with:
+          model: cerebras/zai-glm-4.7
+          agent: opencode-review
+          prompt: Review the current pull request for this repository and leave concise, non-blocking feedback.
+          use_github_token: true
+
+      - name: Summarize diagnostics
+        if: always() && steps.preflight.outputs.skip_opencode != 'true'
+        shell: bash
+        run: |
+          {
+            echo '## OpenCode reviewer'
+            echo
+            echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment failure back to the PR
+        if: (failure() || cancelled()) && steps.preflight.outputs.skip_opencode != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          number='${{ steps.resolve_pr.outputs.pr_number }}'
+
+          body=$'OpenCode review did not complete successfully.\n\n'
+          body+=$"Run: ${RUN_URL}"
+          gh api "repos/${{ github.repository }}/issues/${number}/comments" -f body="$body" >/dev/null
