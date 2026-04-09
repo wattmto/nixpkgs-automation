@@ -106,14 +106,19 @@ jobs:
           mapfile -t changed_files < <(gh api --paginate "repos/${{ github.repository }}/pulls/${pr_number}/files?per_page=100" --jq '.[].filename')
           file_count=${#changed_files[@]}
           tmp_count=0
+          opencode_workflow_count=0
 
           if [ "$file_count" -gt 0 ]; then
             tmp_count=$(printf '%s\n' "${changed_files[@]}" | grep -c '^\.opencode-tmp/' || true)
+            opencode_workflow_count=$(printf '%s\n' "${changed_files[@]}" | grep -c '^\.github/workflows/opencode-.*\.ya\?ml$' || true)
           fi
 
           if [ "$tmp_count" -gt 0 ]; then
             echo 'skip_opencode=true' >> "$GITHUB_OUTPUT"
             echo 'skip_reason=detected .opencode-tmp/** files in PR diff' >> "$GITHUB_OUTPUT"
+          elif [ "$opencode_workflow_count" -gt 0 ]; then
+            echo 'skip_opencode=true' >> "$GITHUB_OUTPUT"
+            echo 'skip_reason=detected OpenCode workflow files in PR diff' >> "$GITHUB_OUTPUT"
           elif [ "$file_count" -gt 250 ]; then
             echo 'skip_opencode=true' >> "$GITHUB_OUTPUT"
             echo "skip_reason=PR diff too large for reliable agent context (${file_count} files)" >> "$GITHUB_OUTPUT"
@@ -220,6 +225,15 @@ jobs:
           body=$'OpenCode review skipped to avoid low-signal output.\n\n'
           body+=$"Reason: ${{ steps.preflight.outputs.skip_reason }}"
           gh api "repos/${{ github.repository }}/issues/${number}/comments" -f body="$body" >/dev/null
+
+      - name: Select OpenCode reviewer agent
+        if: steps.preflight.outputs.skip_opencode != 'true' && steps.thread_context.outputs.mode != 'skip'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          jq '.default_agent = "opencode-review"' opencode.json > "$tmp"
+          mv "$tmp" opencode.json
 
       - name: Run OpenCode reviewer
         if: steps.preflight.outputs.skip_opencode != 'true' && steps.thread_context.outputs.mode != 'skip'

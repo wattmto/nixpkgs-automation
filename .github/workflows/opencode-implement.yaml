@@ -69,6 +69,14 @@ jobs:
             echo "existing_pr_url=$pr_url" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Select OpenCode implementer agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          jq '.default_agent = "opencode-implement"' opencode.json > "$tmp"
+          mv "$tmp" opencode.json
+
       - name: Run OpenCode implementer
         id: run_opencode
         uses: anomalyco/opencode/github@latest

@@ -55,6 +55,14 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Select OpenCode planner agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          jq '.default_agent = "opencode-plan"' opencode.json > "$tmp"
+          mv "$tmp" opencode.json
+
       - name: Run OpenCode planner
         id: run_opencode
         uses: anomalyco/opencode/github@latest
